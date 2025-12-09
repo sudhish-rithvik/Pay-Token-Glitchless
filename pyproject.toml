@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "unified-payment-system"
+version = "0.1.0"
+description = "A unified payment system utilizing a standard internal digital token called PAY_TOKEN."
+authors = ["Your Name <youremail@example.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+flask = "^2.0"
+sqlalchemy = "^1.4"
+pydantic = "^1.8"
+
+[tool.poetry.dev-dependencies]
+pytest = "^6.2"
+black = "^21.7b0"
+mypy = "^0.910"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
