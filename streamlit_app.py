@@ -6,12 +6,13 @@ import sqlite3
 import hashlib
 import time
 from datetime import datetime
+from typing import Dict, Any, List, Optional
 
 import streamlit as st
 
 
 # =========================================================
-#  GENERAL HELPERS
+#  GENERAL HELPERS & PATHS
 # =========================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -154,10 +155,6 @@ def load_unified_pay():
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
 
-    st.sidebar.write("🔍 Debug")
-    st.sidebar.write("BASE_DIR:", BASE_DIR)
-    st.sidebar.write("SRC_DIR:", src_dir)
-
     try:
         user_mod = importlib.import_module("unified_pay.models.user")
         account_mod = importlib.import_module("unified_pay.models.account")
@@ -179,7 +176,7 @@ def load_unified_pay():
     )
 
 
-# Initialise DB before anything else
+# Initialise DB and domain modules
 init_auth_db()
 User, Account, PaymentProcessor, PAY_TOKEN, PaymentMethod, FXService = load_unified_pay()
 
@@ -189,6 +186,9 @@ User, Account, PaymentProcessor, PAY_TOKEN, PaymentMethod, FXService = load_unif
 # =========================================================
 
 def init_state():
+    if "theme" not in st.session_state:
+        st.session_state.theme = "light"  # light / dark
+
     if "auth_user" not in st.session_state:
         st.session_state.auth_user = None  # {"id": ..., "username": ...}
 
@@ -201,7 +201,7 @@ def init_state():
     if "token_mgr" not in st.session_state:
         st.session_state.token_mgr = PAY_TOKEN()
     if "transactions" not in st.session_state:
-        st.session_state.transactions = {}  # txid -> tx_dict
+        st.session_state.transactions: Dict[str, Dict[str, Any]] = {}
     if "accounts_loaded_for_user" not in st.session_state:
         st.session_state.accounts_loaded_for_user = None
     if "fx_service" not in st.session_state:
@@ -209,6 +209,76 @@ def init_state():
 
 
 init_state()
+
+
+# =========================================================
+#  THEME HELPERS
+# =========================================================
+
+def toggle_theme():
+    st.session_state.theme = "dark" if st.session_state.theme == "light" else "light"
+
+
+def apply_global_theme():
+    """Inject CSS based on current theme and show a nice gradient header."""
+    if st.session_state.theme == "dark":
+        st.markdown("""
+            <style>
+                .stApp { background-color: #0E1117; color: #E5E7EB; }
+                [data-testid="stSidebar"] { background-color: #111827; }
+                h1,h2,h3,h4 { color: #60A5FA; }
+                .stButton>button {
+                    background: #22C55E;
+                    color: white;
+                    border-radius: 10px;
+                    border: none;
+                    padding: 0.4rem 0.8rem;
+                }
+                .stButton>button:hover {
+                    filter: brightness(1.1);
+                }
+            </style>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+            <style>
+                .stApp { background-color: #F9FAFB; color: #0F172A; }
+                [data-testid="stSidebar"] { background-color: #E5E7EB; }
+                h1,h2,h3,h4 { color: #0F172A; }
+                .stButton>button {
+                    background: #2563EB;
+                    color: white;
+                    border-radius: 10px;
+                    border: none;
+                    padding: 0.4rem 0.8rem;
+                }
+                .stButton>button:hover {
+                    filter: brightness(1.1);
+                }
+            </style>
+        """, unsafe_allow_html=True)
+
+    # Gradient header
+    st.markdown("""
+    <div style="
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        padding:1rem 1.5rem;
+        border-radius:14px;
+        background:linear-gradient(90deg,#2563EB,#22C55E);
+        color:white;
+        margin-bottom:1rem;
+        box-shadow:0 10px 30px rgba(0,0,0,0.18);
+    ">
+        <div>
+            <h2 style="margin:0;">💸 Unified Payment Orchestrator</h2>
+            <div style="font-size:0.85rem;opacity:0.9;">
+                PAY_TOKEN • AI Rail Routing • FX • Crypto • Multi-speed Settlement
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # =========================================================
@@ -248,7 +318,7 @@ def create_account(user_id: str, balance: float) -> Account:
 def acc_label(acc: Account) -> str:
     user = st.session_state.users.get(acc.user_id)
     uname = user.username if user else "Unknown"
-    return f"{acc.account_id} | {uname} | Balance: {acc.balance:.2f}"
+    return f"{acc.account_id} | {uname} | Balance: ₹{acc.balance:.2f}"
 
 
 def load_accounts_for_logged_in_user():
@@ -287,16 +357,17 @@ def load_accounts_for_logged_in_user():
 #  AUTO SETTLEMENT HELPER
 # =========================================================
 
-def auto_process_transaction(tx: dict, processor: PaymentProcessor, accounts: dict):
+def auto_process_transaction(tx: Dict[str, Any], processor: PaymentProcessor, accounts: Dict[str, Account]):
     """
-    After a delay, automatically decide if the tx is COMPLETED or FAILED,
+    Automatically decide if the tx is COMPLETED or FAILED,
     update balances on success, and attach a failure_reason on failure.
+    Internal amount is always INR (tx["amount"]).
     """
     from_acc = accounts.get(tx["from_account_id"])
     to_acc = accounts.get(tx["to_account_id"])
-    amount_in_inr = tx["amount"]  # internal amount is always INR
+    amount_in_inr = tx["amount"]
 
-    reasons = []
+    reasons: List[str] = []
 
     if from_acc is None or to_acc is None:
         reasons.append("One of the accounts no longer exists.")
@@ -326,23 +397,20 @@ def auto_process_transaction(tx: dict, processor: PaymentProcessor, accounts: di
 
 
 # =========================================================
-#  PAGES
+#  AUTH PAGES / HELPERS
 # =========================================================
 
 def page_overview():
-    st.title("💸 Unified Payment System – PAY_TOKEN Demo")
+    st.header("Dashboard Overview")
     st.markdown(
         """
-        This Streamlit app sits on top of your **`unified_pay`** package and adds:
+        This is your **AI-powered Payment Orchestrator**:
 
-        - ✅ SQLite-based Login & Signup  
-        - ✅ Accounts stored per logged-in user (persist across restarts)  
-        - 🧠 AI-based payment method routing (UPI, Card, Bank, Wallet, Crypto…)  
-        - ⚡ Speed-aware routing (Standard / Priority / Express)  
-        - 🌐 Per-payment FX & Crypto conversion inside Payments  
-        - 📜 Transaction History with filters  
-        - 🤖 Auto-settlement of payments with reason on failure  
-        - 🔐 PAY_TOKEN issue / validate / revoke  
+        - Multi-rail routing (UPI, Card, Bank, Wallet, Crypto)
+        - Speed-aware settlement (Standard / Priority / Express)
+        - FX and crypto conversion built-in
+        - PAY_TOKEN for secure session / access
+        - Per-user accounts with SQLite persistence
         """
     )
 
@@ -352,7 +420,7 @@ def page_overview():
             f"(id: {st.session_state.auth_user['id']})"
         )
     else:
-        st.info("You are not logged in. Go to **Auth / Login** page to sign in or sign up.")
+        st.info("You are not logged in. Go to **Auth / Login** to sign in or sign up.")
 
 
 def page_auth():
@@ -419,13 +487,16 @@ def page_auth():
                     st.error(str(e))
 
 
-def require_login():
-    """Guard pages that require authentication."""
+def require_login() -> bool:
     if not st.session_state.auth_user:
         st.warning("You must be logged in to access this page. Go to **Auth / Login**.")
         return False
     return True
 
+
+# =========================================================
+#  USERS & ACCOUNTS PAGE
+# =========================================================
 
 def page_users_accounts():
     if not require_login():
@@ -451,7 +522,7 @@ def page_users_accounts():
             acc = create_account(auth_user["id"], bal)
             st.success(
                 f"Account {acc.account_id} created for {auth_user['username']} "
-                f"with balance {acc.balance:.2f} INR"
+                f"with balance ₹{acc.balance:.2f}"
             )
 
     # ----- Demo users (optional) -----
@@ -478,7 +549,7 @@ def page_users_accounts():
                 acc = create_account(chosen_uid, bal2)
                 st.success(
                     f"Demo account {acc.account_id} created for {chosen_uid} "
-                    f"with balance {acc.balance:.2f} INR"
+                    f"with balance ₹{acc.balance:.2f}"
                 )
 
     st.divider()
@@ -497,6 +568,10 @@ def page_users_accounts():
         st.write("No accounts yet.")
 
 
+# =========================================================
+#  PAYMENTS PAGE (with FX + Crypto + AI routing)
+# =========================================================
+
 def page_payments():
     if not require_login():
         return
@@ -505,8 +580,8 @@ def page_payments():
 
     st.header("🔁 Payments")
 
-    processor = st.session_state.processor
-    accounts = st.session_state.accounts
+    processor: PaymentProcessor = st.session_state.processor
+    accounts: Dict[str, Account] = st.session_state.accounts
     fx: FXService = st.session_state.fx_service
 
     if len(accounts) < 2:
@@ -553,8 +628,8 @@ def page_payments():
             key="amt_input",
         )
 
-        converted_amount = None
-        fx_rate = None
+        converted_amount: Optional[float] = None
+        fx_rate: Optional[float] = None
         if amount_from > 0:
             try:
                 fx_rate = fx.get_rate(from_ccy, to_ccy)
@@ -576,13 +651,8 @@ def page_payments():
         # Map speed → AI flags
         if speed_mode == "Standard":
             need_instant = False
-            force_crypto = False
-        elif speed_mode == "Priority":
+        else:  # Priority / Express
             need_instant = True
-            force_crypto = False
-        else:  # Express
-            need_instant = True
-            force_crypto = True  # prefer crypto for high amounts
 
         # -------- AI / Manual method selection --------
         st.markdown("### 🧠 Payment Method Selection")
@@ -598,7 +668,7 @@ def page_payments():
             "Wallet",
             "Crypto",
         ]
-        allowed_methods = []
+        allowed_methods: List[str] = []
         for m in base_methods:
             if m == "UPI" and not is_inr_to_inr:
                 continue
@@ -606,8 +676,8 @@ def page_payments():
 
         use_ai = st.checkbox("Let AI choose best method", value=True)
 
-        manual_method = None
-        manual_method_label = None
+        manual_method: Optional[PaymentMethod] = None
+        manual_method_label: Optional[str] = None
         if not use_ai:
             manual_method_label = st.selectbox(
                 "Choose method",
@@ -669,8 +739,8 @@ def page_payments():
             recommended_method = None
 
         # -------- Crypto extra UI (if crypto rail is active) --------
-        crypto_asset = None
-        crypto_rate_to_to = None
+        crypto_asset: Optional[str] = None
+        crypto_rate_to_to: Optional[float] = None
 
         crypto_is_active = (
             (manual_method == PaymentMethod.CRYPTO)
@@ -707,7 +777,7 @@ def page_payments():
                     st.error(f"FX conversion failed; cannot initiate payment: {e}")
                     return
 
-                chosen_method = manual_method if not use_ai else None
+                chosen_method: Optional[PaymentMethod] = manual_method if not use_ai else None
 
                 # Override: very high Express → crypto rail
                 if amount_in_inr >= 100_000 and speed_mode == "Express":
@@ -736,9 +806,10 @@ def page_payments():
                         tx["crypto_rate_to_to_ccy"] = crypto_rate_to_to
 
                 txid = tx.get("transaction_id", uuid.uuid4().hex[:8])
+                tx["transaction_id"] = txid
                 st.session_state.transactions[txid] = tx
 
-                # 5-second processing simulation
+                # Simulate processing with small countdown
                 for i in range(5, 0, -1):
                     status_placeholder.info(f"Processing payment... {i}s")
                     time.sleep(1)
@@ -756,7 +827,8 @@ def page_payments():
                     disp_to_amount = amount_from
                     disp_to_ccy = to_ccy
 
-                method_str = str(tx.get("method", "unknown")).upper()
+                method_val = tx.get("method", "unknown")
+                method_str = str(method_val).upper()
 
                 if final_status == "COMPLETED":
                     status_placeholder.success(
@@ -818,7 +890,7 @@ def page_payments():
                 )
 
             summary_lines.append(
-                f"**Internal Ledger Amount:** {amount_in_inr:.2f} INR"
+                f"**Internal Ledger Amount:** ₹{amount_in_inr:.2f} (INR)"
             )
             summary_lines.append(
                 f"**Method:** **{method_str}**"
@@ -858,6 +930,10 @@ def page_payments():
         st.write("No transactions yet.")
 
 
+# =========================================================
+#  TRANSACTION HISTORY PAGE
+# =========================================================
+
 def page_transaction_history():
     if not require_login():
         return
@@ -865,11 +941,11 @@ def page_transaction_history():
     st.header("📜 Transaction History")
     st.caption("All your past transactions with FX & crypto details.")
 
-    accounts = st.session_state.accounts
+    accounts: Dict[str, Account] = st.session_state.accounts
 
     # Collect only transactions related to this user's accounts
     user_account_ids = set(accounts.keys())
-    user_tx = []
+    user_tx: List[Dict[str, Any]] = []
     for tx in st.session_state.transactions.values():
         if (
             tx.get("from_account_id") in user_account_ids
@@ -898,7 +974,7 @@ def page_transaction_history():
             ["All", "UPI", "CARD", "BANK_TRANSFER", "NETBANKING", "WALLET", "CRYPTO"],
         )
 
-    filtered = []
+    filtered: List[Dict[str, Any]] = []
     for tx in user_tx:
         if status_filter != "All" and tx.get("status") != status_filter:
             continue
@@ -911,7 +987,7 @@ def page_transaction_history():
     st.divider()
 
     # -----------------------------
-    # TABLE-LIKE CARD VIEW
+    # CARD VIEW
     # -----------------------------
     for tx in reversed(filtered):
         from_ccy = tx.get("from_currency", "INR")
@@ -962,6 +1038,10 @@ def page_transaction_history():
             st.caption("—" * 50)
 
 
+# =========================================================
+#  PAY_TOKEN PAGE
+# =========================================================
+
 def page_pay_token():
     if not require_login():
         return
@@ -1009,8 +1089,18 @@ def page_pay_token():
 def main():
     st.set_page_config(page_title="Unified Payment System", layout="wide")
 
-    # Sidebar: show auth status quickly
+    # Apply theme + gradient header
+    apply_global_theme()
+
+    # Sidebar: theme toggle + auth quick status
     with st.sidebar:
+        st.markdown("## 🎨 Appearance")
+        mode_label = "🌙 Dark Mode" if st.session_state.theme == "light" else "☀️ Light Mode"
+        if st.button(mode_label):
+            toggle_theme()
+            rerun()
+
+        st.markdown("---")
         st.markdown("## 👤 User")
         if st.session_state.auth_user:
             st.write(f"**{st.session_state.auth_user['username']}**")
