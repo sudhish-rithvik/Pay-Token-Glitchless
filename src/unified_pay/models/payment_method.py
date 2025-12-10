@@ -11,7 +11,7 @@ class PaymentMethod(str, Enum):
     WALLET = "wallet"
     CRYPTO = "crypto"
     NETBANKING = "netbanking"
-    CASH = "cash"  # for completeness / offline
+    CASH = "cash"
 
 
 @dataclass
