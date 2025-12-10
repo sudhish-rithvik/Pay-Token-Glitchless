@@ -340,6 +340,7 @@ def page_overview():
         - 🧠 AI-based payment method routing (UPI, Card, Bank, Wallet, Crypto…)  
         - ⚡ Speed-aware routing (Standard / Priority / Express)  
         - 🌐 Per-payment FX & Crypto conversion inside Payments  
+        - 📜 Transaction History with filters  
         - 🤖 Auto-settlement of payments with reason on failure  
         - 🔐 PAY_TOKEN issue / validate / revoke  
         """
@@ -540,7 +541,6 @@ def page_payments():
         with cc1:
             from_ccy = st.selectbox("From currency", symbols, index=symbols.index("INR"))
         with cc2:
-            # default to same as from_ccy (INR→INR) to make UPI possible
             default_to_index = symbols.index("INR") if "INR" in symbols else 0
             to_ccy = st.selectbox("To currency", symbols, index=default_to_index)
 
@@ -625,16 +625,15 @@ def page_payments():
             manual_method = mapping[manual_method_label]
 
         # -------- AI RECOMMENDATION --------
-        crypto_asset_for_display = None
         try:
-            # High-value Express → strong crypto preference
             # Internal decisions based on INR equivalent
-            amount_in_inr_preview = amount_from
-            if from_ccy != "INR":
-                try:
+            try:
+                if from_ccy == "INR":
+                    amount_in_inr_preview = amount_from
+                else:
                     amount_in_inr_preview = fx.convert(amount_from, from_ccy, "INR")
-                except Exception:
-                    pass
+            except Exception:
+                amount_in_inr_preview = amount_from  # fallback
 
             if amount_in_inr_preview >= 100_000 and speed_mode == "Express":
                 recommended_method = PaymentMethod.CRYPTO
@@ -749,12 +748,21 @@ def page_payments():
                 )
                 st.session_state.transactions[txid] = tx  # update stored copy
 
+                # Decide display amount on success line
+                if "amount_to" in tx:
+                    disp_to_amount = tx["amount_to"]
+                    disp_to_ccy = tx.get("to_currency", to_ccy)
+                else:
+                    disp_to_amount = amount_from
+                    disp_to_ccy = to_ccy
+
+                method_str = str(tx.get("method", "unknown")).upper()
+
                 if final_status == "COMPLETED":
                     status_placeholder.success(
                         f"Transaction completed ✅ | Speed: {speed_mode} | "
-                        f"Method: {tx.get('method', 'unknown')} | "
-                        f"{amount_from:.2f} {from_ccy} → "
-                        f"{tx.get('amount_to', converted_amount):.2f if tx.get('amount_to', None) else amount_from:.2f} {to_ccy}"
+                        f"Method: {method_str} | "
+                        f"{amount_from:.2f} {from_ccy} → {disp_to_amount:.2f} {disp_to_ccy}"
                     )
                 else:
                     status_placeholder.error(
@@ -788,6 +796,9 @@ def page_payments():
             amount_to = tx_obj.get("amount_to", None)
             amount_in_inr = tx_obj.get("amount", 0.0)
 
+            method_val = tx_obj.get("method", "N/A")
+            method_str = str(method_val).upper()
+
             st.markdown("### ✅ Transaction Summary")
 
             summary_lines = [
@@ -810,7 +821,7 @@ def page_payments():
                 f"**Internal Ledger Amount:** {amount_in_inr:.2f} INR"
             )
             summary_lines.append(
-                f"**Method:** **{tx_obj.get('method', 'N/A').upper()}**"
+                f"**Method:** **{method_str}**"
             )
             summary_lines.append(
                 f"**Speed Mode:** **{tx_obj.get('speed_mode', 'N/A')}**"
@@ -845,6 +856,110 @@ def page_payments():
         st.json(st.session_state.transactions)
     else:
         st.write("No transactions yet.")
+
+
+def page_transaction_history():
+    if not require_login():
+        return
+
+    st.header("📜 Transaction History")
+    st.caption("All your past transactions with FX & crypto details.")
+
+    accounts = st.session_state.accounts
+
+    # Collect only transactions related to this user's accounts
+    user_account_ids = set(accounts.keys())
+    user_tx = []
+    for tx in st.session_state.transactions.values():
+        if (
+            tx.get("from_account_id") in user_account_ids
+            or tx.get("to_account_id") in user_account_ids
+        ):
+            user_tx.append(tx)
+
+    if not user_tx:
+        st.info("No transactions yet.")
+        return
+
+    # -----------------------------
+    # FILTERS
+    # -----------------------------
+    col1, col2 = st.columns(2)
+
+    with col1:
+        status_filter = st.selectbox(
+            "Filter by Status",
+            ["All", "COMPLETED", "FAILED", "PENDING"],
+        )
+
+    with col2:
+        method_filter = st.selectbox(
+            "Filter by Method",
+            ["All", "UPI", "CARD", "BANK_TRANSFER", "NETBANKING", "WALLET", "CRYPTO"],
+        )
+
+    filtered = []
+    for tx in user_tx:
+        if status_filter != "All" and tx.get("status") != status_filter:
+            continue
+        method_val = tx.get("method")
+        method_str = str(method_val).upper() if method_val else ""
+        if method_filter != "All" and method_str != method_filter:
+            continue
+        filtered.append(tx)
+
+    st.divider()
+
+    # -----------------------------
+    # TABLE-LIKE CARD VIEW
+    # -----------------------------
+    for tx in reversed(filtered):
+        from_ccy = tx.get("from_currency", "INR")
+        to_ccy = tx.get("to_currency", "INR")
+
+        amt_from = tx.get("amount_from", tx.get("amount", 0.0))
+        amt_to = tx.get("amount_to", None)
+        ledger_amt = tx.get("amount", 0.0)
+
+        method_val = tx.get("method", "N/A")
+        method_str = str(method_val).upper()
+
+        with st.container(border=True):
+            st.markdown(
+                f"""
+                **Transaction ID:** `{tx.get("transaction_id", "N/A")}`  
+                **Route:** {from_ccy} → {to_ccy}  
+                **From Amount:** {amt_from:.2f} {from_ccy}
+                """
+            )
+
+            if amt_to is not None:
+                st.markdown(
+                    f"**Converted Amount:** {amt_to:.2f} {to_ccy}"
+                )
+            else:
+                st.markdown(f"**To Currency:** {to_ccy}")
+
+            st.markdown(
+                f"""
+                **Method:** {method_str}  
+                **Speed:** {tx.get("speed_mode", "Standard")}  
+                **Ledger Amount (INR):** ₹{ledger_amt:.2f}
+                """
+            )
+
+            if "crypto_asset" in tx:
+                st.info(f"Crypto Rail Used: **{tx['crypto_asset']}**")
+
+            status = tx.get("status", "PENDING")
+            if status == "COMPLETED":
+                st.success("✅ COMPLETED")
+            elif status == "FAILED":
+                st.error(f"❌ FAILED — {tx.get('failure_reason', 'Unknown error')}")
+            else:
+                st.warning("⏳ PENDING")
+
+            st.caption("—" * 50)
 
 
 def page_pay_token():
@@ -911,6 +1026,7 @@ def main():
         "Auth / Login": page_auth,
         "Users & Accounts": page_users_accounts,
         "Payments": page_payments,
+        "Transaction History": page_transaction_history,
         "PAY_TOKEN": page_pay_token,
     }
 
