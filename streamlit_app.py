@@ -164,6 +164,7 @@ def load_unified_pay():
         pp_mod = importlib.import_module("unified_pay.services.payment_processor")
         token_mod = importlib.import_module("unified_pay.core.token")
         pm_mod = importlib.import_module("unified_pay.models.payment_method")
+        fx_mod = importlib.import_module("unified_pay.services.fx_service")
     except ModuleNotFoundError as e:
         st.error(f"❌ Could not import unified_pay: {e}")
         st.stop()
@@ -174,12 +175,13 @@ def load_unified_pay():
         pp_mod.PaymentProcessor,
         token_mod.PAY_TOKEN,
         pm_mod.PaymentMethod,
+        fx_mod.FXService,
     )
 
 
 # Initialise DB before anything else
 init_auth_db()
-User, Account, PaymentProcessor, PAY_TOKEN, PaymentMethod = load_unified_pay()
+User, Account, PaymentProcessor, PAY_TOKEN, PaymentMethod, FXService = load_unified_pay()
 
 
 # =========================================================
@@ -202,6 +204,8 @@ def init_state():
         st.session_state.transactions = {}  # txid -> tx_dict
     if "accounts_loaded_for_user" not in st.session_state:
         st.session_state.accounts_loaded_for_user = None
+    if "fx_service" not in st.session_state:
+        st.session_state.fx_service = FXService()
 
 
 init_state()
@@ -290,14 +294,14 @@ def auto_process_transaction(tx: dict, processor: PaymentProcessor, accounts: di
     """
     from_acc = accounts.get(tx["from_account_id"])
     to_acc = accounts.get(tx["to_account_id"])
-    amount = tx["amount"]
+    amount_in_inr = tx["amount"]  # internal amount is always INR
 
     reasons = []
 
     if from_acc is None or to_acc is None:
         reasons.append("One of the accounts no longer exists.")
 
-    if from_acc is not None and from_acc.balance < amount:
+    if from_acc is not None and from_acc.balance < amount_in_inr:
         reasons.append("Insufficient balance in source account.")
 
     if tx["from_account_id"] == tx["to_account_id"]:
@@ -311,10 +315,10 @@ def auto_process_transaction(tx: dict, processor: PaymentProcessor, accounts: di
         tx["failure_reason"] = reason_text
         return "FAILED", reason_text
     else:
-        # SUCCESS: update balances
+        # SUCCESS: update balances (in INR)
         if from_acc is not None and to_acc is not None:
-            from_acc.balance -= amount
-            to_acc.balance += amount
+            from_acc.balance -= amount_in_inr
+            to_acc.balance += amount_in_inr
         processor.confirm_payment(tx, mark_failed=False)
         tx["status"] = "COMPLETED"
         tx.pop("failure_reason", None)
@@ -334,6 +338,8 @@ def page_overview():
         - ✅ SQLite-based Login & Signup  
         - ✅ Accounts stored per logged-in user (persist across restarts)  
         - 🧠 AI-based payment method routing (UPI, Card, Bank, Wallet, Crypto…)  
+        - ⚡ Speed-aware routing (Standard / Priority / Express)  
+        - 🌐 Per-payment FX & Crypto conversion inside Payments  
         - 🤖 Auto-settlement of payments with reason on failure  
         - 🔐 PAY_TOKEN issue / validate / revoke  
         """
@@ -438,13 +444,13 @@ def page_users_accounts():
         st.write(f"Logged in as: **{auth_user['username']}**")
 
         bal = st.number_input(
-            "Initial Balance for new account", min_value=0.0, value=0.0, step=0.5
+            "Initial Balance for new account (INR)", min_value=0.0, value=0.0, step=0.5
         )
         if st.button("Create My Account"):
             acc = create_account(auth_user["id"], bal)
             st.success(
                 f"Account {acc.account_id} created for {auth_user['username']} "
-                f"with balance {acc.balance:.2f}"
+                f"with balance {acc.balance:.2f} INR"
             )
 
     # ----- Demo users (optional) -----
@@ -465,13 +471,13 @@ def page_users_accounts():
             picked = st.selectbox("Select user (demo)", labels)
             chosen_uid = user_ids[labels.index(picked)]
             bal2 = st.number_input(
-                "Initial Balance (demo account)", min_value=0.0, value=0.0, step=0.5
+                "Initial Balance (demo account, INR)", min_value=0.0, value=0.0, step=0.5
             )
             if st.button("Create Demo Account"):
                 acc = create_account(chosen_uid, bal2)
                 st.success(
                     f"Demo account {acc.account_id} created for {chosen_uid} "
-                    f"with balance {acc.balance:.2f}"
+                    f"with balance {acc.balance:.2f} INR"
                 )
 
     st.divider()
@@ -500,6 +506,7 @@ def page_payments():
 
     processor = st.session_state.processor
     accounts = st.session_state.accounts
+    fx: FXService = st.session_state.fx_service
 
     if len(accounts) < 2:
         st.info("Need at least **two accounts** to make a payment.")
@@ -511,10 +518,11 @@ def page_payments():
     col1, col2 = st.columns(2)
 
     # -----------------------
-    # LEFT: Initiate payment
+    # LEFT: Initiate payment (with FX + speed + AI routing)
     # -----------------------
     with col1:
         st.subheader("Initiate Payment")
+
         from_label = st.selectbox("From account", labels, key="from_acc")
         to_label = st.selectbox("To account", labels, key="to_acc")
 
@@ -524,26 +532,86 @@ def page_payments():
         if from_id == to_id:
             st.warning("Sender and receiver must be different accounts.")
 
-        amount = st.number_input(
-            "Amount", min_value=0.01, value=1.0, step=0.5, key="amt_input"
+        # -------- CURRENCY SELECTION --------
+        symbols = fx.get_popular_symbols()
+        crypto_symbols = ["BTC", "ETH", "USDT", "SOL", "BNB"]
+
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            from_ccy = st.selectbox("From currency", symbols, index=symbols.index("INR"))
+        with cc2:
+            # default to same as from_ccy (INR→INR) to make UPI possible
+            default_to_index = symbols.index("INR") if "INR" in symbols else 0
+            to_ccy = st.selectbox("To currency", symbols, index=default_to_index)
+
+        # Amount is expressed in from_ccy
+        amount_from = st.number_input(
+            f"Amount ({from_ccy})",
+            min_value=0.01,
+            value=1.0,
+            step=0.5,
+            key="amt_input",
         )
 
+        converted_amount = None
+        fx_rate = None
+        if amount_from > 0:
+            try:
+                fx_rate = fx.get_rate(from_ccy, to_ccy)
+                converted_amount = fx_rate * amount_from
+                st.caption(
+                    f"{amount_from:.4f} {from_ccy} ≈ {converted_amount:.4f} {to_ccy}  \n"
+                    f"1 {from_ccy} ≈ {fx_rate:.6f} {to_ccy}"
+                )
+            except Exception as e:
+                st.warning(f"FX preview unavailable: {e}")
+
+        # -------- SPEED SELECTION --------
+        st.markdown("### ⚡ Transaction Speed")
+        speed_mode = st.selectbox(
+            "Choose processing speed",
+            ["Standard", "Priority", "Express"],
+        )
+
+        # Map speed → AI flags
+        if speed_mode == "Standard":
+            need_instant = False
+            force_crypto = False
+        elif speed_mode == "Priority":
+            need_instant = True
+            force_crypto = False
+        else:  # Express
+            need_instant = True
+            force_crypto = True  # prefer crypto for high amounts
+
+        # -------- AI / Manual method selection --------
         st.markdown("### 🧠 Payment Method Selection")
+
+        # UPI allowed only for INR→INR
+        is_inr_to_inr = (from_ccy == "INR" and to_ccy == "INR")
+
+        base_methods = [
+            "UPI",
+            "Card",
+            "Bank Transfer",
+            "NetBanking",
+            "Wallet",
+            "Crypto",
+        ]
+        allowed_methods = []
+        for m in base_methods:
+            if m == "UPI" and not is_inr_to_inr:
+                continue
+            allowed_methods.append(m)
 
         use_ai = st.checkbox("Let AI choose best method", value=True)
 
         manual_method = None
+        manual_method_label = None
         if not use_ai:
-            method_label = st.selectbox(
+            manual_method_label = st.selectbox(
                 "Choose method",
-                [
-                    "UPI",
-                    "Card",
-                    "Bank Transfer",
-                    "NetBanking",
-                    "Wallet",
-                    "Crypto",
-                ],
+                allowed_methods,
                 key="manual_method",
             )
             mapping = {
@@ -554,33 +622,120 @@ def page_payments():
                 "Wallet": PaymentMethod.WALLET,
                 "Crypto": PaymentMethod.CRYPTO,
             }
-            manual_method = mapping[method_label]
+            manual_method = mapping[manual_method_label]
 
-        # Show AI recommendation even if user overrides
+        # -------- AI RECOMMENDATION --------
+        crypto_asset_for_display = None
         try:
-            recommended_method = processor.choose_payment_method(
-                amount=amount,
-                currency="INR",
-                is_domestic=True,
-                need_instant=True,
-                allow_crypto=True,
+            # High-value Express → strong crypto preference
+            # Internal decisions based on INR equivalent
+            amount_in_inr_preview = amount_from
+            if from_ccy != "INR":
+                try:
+                    amount_in_inr_preview = fx.convert(amount_from, from_ccy, "INR")
+                except Exception:
+                    pass
+
+            if amount_in_inr_preview >= 100_000 and speed_mode == "Express":
+                recommended_method = PaymentMethod.CRYPTO
+                st.info(
+                    "High-value + Express detected → "
+                    "**CRYPTO preferred for fastest settlement** ✅"
+                )
+            else:
+                recommended_method = processor.choose_payment_method(
+                    amount=amount_in_inr_preview,
+                    currency=from_ccy,
+                    is_domestic=True,
+                    need_instant=need_instant,
+                    allow_crypto=True,
+                )
+
+            # Enforce UPI restriction: only INR→INR
+            if recommended_method == PaymentMethod.UPI and not is_inr_to_inr:
+                st.warning(
+                    "UPI is only allowed for INR → INR. "
+                    "Falling back to CARD for this scenario."
+                )
+                recommended_method = PaymentMethod.CARD
+
+            st.info(
+                f"AI recommendation: **{recommended_method.value.upper()}**  \n"
+                f"Speed mode: **{speed_mode}**  \n"
+                f"Route: {from_ccy} → {to_ccy}"
             )
-            st.info(f"AI recommendation: **{recommended_method.value.upper()}**")
+
         except Exception as e:
             st.warning(f"Could not compute AI recommendation: {e}")
+            recommended_method = None
+
+        # -------- Crypto extra UI (if crypto rail is active) --------
+        crypto_asset = None
+        crypto_rate_to_to = None
+
+        crypto_is_active = (
+            (manual_method == PaymentMethod.CRYPTO)
+            or (use_ai and recommended_method == PaymentMethod.CRYPTO)
+        )
+
+        if crypto_is_active:
+            st.markdown("### 🪙 Crypto Details")
+            crypto_asset = st.selectbox(
+                "Crypto asset",
+                crypto_symbols,
+                key="crypto_asset_select",
+            )
+            try:
+                crypto_rate_to_to = fx.get_rate(crypto_asset, to_ccy)
+                st.caption(
+                    f"1 {crypto_asset} ≈ {crypto_rate_to_to:.6f} {to_ccy}"
+                )
+            except Exception as e:
+                st.warning(f"Crypto price lookup failed: {e}")
 
         status_placeholder = st.empty()
 
+        # -------- INITIATE PAYMENT --------
         if st.button("Initiate"):
             try:
+                # Compute internal amount in INR for ledger
+                try:
+                    if from_ccy == "INR":
+                        amount_in_inr = amount_from
+                    else:
+                        amount_in_inr = fx.convert(amount_from, from_ccy, "INR")
+                except Exception as e:
+                    st.error(f"FX conversion failed; cannot initiate payment: {e}")
+                    return
+
                 chosen_method = manual_method if not use_ai else None
+
+                # Override: very high Express → crypto rail
+                if amount_in_inr >= 100_000 and speed_mode == "Express":
+                    chosen_method = PaymentMethod.CRYPTO
+
                 tx = processor.initiate_payment(
                     from_account=accounts[from_id],
                     to_account=accounts[to_id],
-                    amount=amount,
+                    amount=amount_in_inr,  # internal INR amount
                     method=chosen_method,
                     auto_pick_method=use_ai,
+                    need_instant=need_instant,
                 )
+
+                # Store FX + display metadata
+                tx["speed_mode"] = speed_mode
+                tx["from_currency"] = from_ccy
+                tx["to_currency"] = to_ccy
+                tx["amount_from"] = amount_from
+                if converted_amount is not None:
+                    tx["amount_to"] = converted_amount
+                    tx["fx_rate"] = fx_rate
+                if crypto_is_active and crypto_asset:
+                    tx["crypto_asset"] = crypto_asset
+                    if crypto_rate_to_to is not None:
+                        tx["crypto_rate_to_to_ccy"] = crypto_rate_to_to
+
                 txid = tx.get("transaction_id", uuid.uuid4().hex[:8])
                 st.session_state.transactions[txid] = tx
 
@@ -595,43 +750,93 @@ def page_payments():
                 st.session_state.transactions[txid] = tx  # update stored copy
 
                 if final_status == "COMPLETED":
-                    status_placeholder.success("Transaction completed ✅")
+                    status_placeholder.success(
+                        f"Transaction completed ✅ | Speed: {speed_mode} | "
+                        f"Method: {tx.get('method', 'unknown')} | "
+                        f"{amount_from:.2f} {from_ccy} → "
+                        f"{tx.get('amount_to', converted_amount):.2f if tx.get('amount_to', None) else amount_from:.2f} {to_ccy}"
+                    )
                 else:
                     status_placeholder.error(
-                        f"Transaction failed ❌ — {reason}"
+                        f"Transaction failed ❌ | Reason: {reason} | "
+                        f"Speed: {speed_mode}"
                     )
 
             except Exception as e:
                 st.error(f"Error initiating payment: {e}")
 
     # -----------------------
-    # RIGHT: Confirm payment (read-only)
+    # RIGHT: Transaction Status (pretty summary, no raw JSON)
     # -----------------------
     with col2:
-        st.subheader("Confirm / Update Payment")
+        st.subheader("Transaction Status")
         st.caption(
             "Transactions are auto-processed after 5 seconds. "
-            "This panel only shows the latest status and failure reason."
+            "Select a transaction to view its final status."
         )
 
         if not st.session_state.transactions:
-            st.write("No transactions yet.")
+            st.info("No transactions yet.")
         else:
             tx_ids = list(st.session_state.transactions.keys())
             chosen_txid = st.selectbox("Select transaction", tx_ids)
             tx_obj = st.session_state.transactions[chosen_txid]
 
-            st.json(tx_obj)
+            from_ccy = tx_obj.get("from_currency", "INR")
+            to_ccy = tx_obj.get("to_currency", "INR")
+            amount_from = tx_obj.get("amount_from", tx_obj.get("amount", 0.0))
+            amount_to = tx_obj.get("amount_to", None)
+            amount_in_inr = tx_obj.get("amount", 0.0)
+
+            st.markdown("### ✅ Transaction Summary")
+
+            summary_lines = [
+                f"**Transaction ID:** `{tx_obj.get('transaction_id', 'N/A')}`",
+                f"**From Account:** `{tx_obj.get('from_account_id', 'N/A')}`",
+                f"**To Account:** `{tx_obj.get('to_account_id', 'N/A')}`",
+                f"**From Amount:** {amount_from:.2f} {from_ccy}",
+            ]
+
+            if amount_to is not None:
+                summary_lines.append(
+                    f"**To Amount (FX):** {amount_to:.2f} {to_ccy}"
+                )
+            else:
+                summary_lines.append(
+                    f"**To Currency:** {to_ccy}"
+                )
+
+            summary_lines.append(
+                f"**Internal Ledger Amount:** {amount_in_inr:.2f} INR"
+            )
+            summary_lines.append(
+                f"**Method:** **{tx_obj.get('method', 'N/A').upper()}**"
+            )
+            summary_lines.append(
+                f"**Speed Mode:** **{tx_obj.get('speed_mode', 'N/A')}**"
+            )
+            summary_lines.append(
+                f"**Status:** **{tx_obj.get('status', 'PENDING')}**"
+            )
+
+            if "crypto_asset" in tx_obj:
+                summary_lines.append(
+                    f"**Crypto Rail:** {tx_obj['crypto_asset']}"
+                )
+
+            st.markdown("\n\n".join(summary_lines))
 
             if tx_obj.get("status") == "FAILED":
-                st.error(f"Reason: {tx_obj.get('failure_reason', 'Unknown error')}")
+                st.error(
+                    f"❌ Reason for Failure: {tx_obj.get('failure_reason', 'Unknown error')}"
+                )
             elif tx_obj.get("status") == "COMPLETED":
-                st.success("This transaction is completed ✅")
+                st.success("✅ Transaction completed successfully!")
             else:
-                st.info("This transaction is still pending (no auto-processing run yet).")
+                st.info("⏳ Transaction is still processing…")
 
     st.divider()
-    st.subheader("Account Balances")
+    st.subheader("Account Balances (INR)")
     for a in accounts.values():
         st.write(acc_label(a))
 
