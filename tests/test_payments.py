@@ -17,7 +17,7 @@ class TestPaymentProcessor(unittest.TestCase):
         self.assertEqual(transaction.amount, amount)
         self.assertEqual(self.sender_account.balance, 900)
         self.assertEqual(self.receiver_account.balance, 600)
-
+        
     def test_initiate_payment_insufficient_funds(self):
         amount = 1100
         with self.assertRaises(ValueError):
