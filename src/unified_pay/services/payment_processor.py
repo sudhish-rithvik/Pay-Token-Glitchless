@@ -121,6 +121,7 @@ class PaymentProcessor:
         to_account: Any,
         amount: float,
         currency: Optional[str] = None,
+        target_currency: Optional[str] = None,
         method: Optional[PaymentMethod] = None,
         auto_pick_method: bool = True,
         need_instant: bool = True,
@@ -187,13 +188,18 @@ class PaymentProcessor:
         if from_account.account_id == to_account.account_id:
             raise ValueError("Sender and receiver accounts must be different.")
 
+        # ----- Detect Cross-border natively -----
+        eff_currency = currency or self.config.default_currency
+        eff_target = target_currency or eff_currency
+        eff_domestic = (eff_currency == eff_target) if is_domestic is None else is_domestic
+        
         # ----- Decide payment method -----
         chosen_method: PaymentMethod
         if auto_pick_method and method is None:
             chosen_method = self.choose_payment_method(
                 amount=amount,
-                currency=currency,
-                is_domestic=is_domestic,
+                currency=eff_currency,
+                is_domestic=eff_domestic,
                 need_instant=need_instant,
                 user_pref=user_pref,
                 allow_crypto=allow_crypto,
@@ -214,7 +220,8 @@ class PaymentProcessor:
             "from_account_id": from_account.account_id,
             "to_account_id": to_account.account_id,
             "amount": float(amount),
-            "currency": currency or self.config.default_currency,
+            "currency": eff_currency,
+            "target_currency": eff_target,
             "method": chosen_method.value,
             "status": "PENDING",
             "metadata": metadata or {},
