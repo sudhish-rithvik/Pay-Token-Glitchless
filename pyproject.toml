@@ -1,3 +1,16 @@
+[project]
+name = "unified-payment-system"
+version = "0.1.0"
+description = "A unified payment system utilizing a standard internal digital token called PAY_TOKEN."
+dependencies = [
+    "fastapi>=0.68.0",
+    "uvicorn>=0.15.0",
+    "pydantic>=1.8.2",
+    "python-dotenv>=0.19.1",
+    "requests>=2.26.0",
+    "python-multipart>=0.0.5",
+]
+
 [tool.poetry]
 name = "unified-payment-system"
 version = "0.1.0"
