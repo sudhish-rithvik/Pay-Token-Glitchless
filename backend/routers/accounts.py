@@ -1,9 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from typing import List
 import uuid
-from datetime import datetime
 from backend.schemas import AccountCreate, AccountResponse
-from backend.supabase_client import get_supabase
+from backend.db import get_db
 
 router = APIRouter(
     prefix="/accounts",
@@ -11,84 +10,64 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+def _row_to_response(row) -> AccountResponse:
+    return AccountResponse(
+        id=str(row["id"]),
+        user_id=row["user_id"],
+        balance=row["balance"],
+        account_type=row["account_type"] or "CARD",
+        account_number=row["account_number"],
+        cvv=row["cvv"],
+        expiry_date=row["expiry_date"],
+        upi_id=row["upi_id"],
+        ifsc=row["ifsc"],
+        bank_name=row["bank_name"],
+        wallet_address=row["wallet_address"],
+        network=row["network"],
+    )
+
+
 @router.get("/{user_id}", response_model=List[AccountResponse])
 def get_accounts(user_id: str):
-    supabase = get_supabase()
-    
-    try:
-        response = supabase.table("accounts").select("*").eq("user_id", user_id).execute()
-        return [
-            AccountResponse(
-                id=str(row["id"]), 
-                user_id=row["user_id"], 
-                balance=row["balance"],
-                account_type=row.get("account_type", "CARD"),
-                account_number=row.get("account_number"),
-                cvv=row.get("cvv"),
-                expiry_date=row.get("expiry_date"),
-                upi_id=row.get("upi_id"),
-                ifsc=row.get("ifsc"),
-                bank_name=row.get("bank_name"),
-                wallet_address=row.get("wallet_address"),
-                network=row.get("network")
-            )
-            for row in response.data
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase fetch failed: {str(e)}")
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at", (user_id,)
+        ).fetchall()
+    return [_row_to_response(r) for r in rows]
+
 
 @router.post("/", response_model=AccountResponse)
 def create_account(account: AccountCreate):
     acc_id = uuid.uuid4().hex
-    supabase = get_supabase()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO accounts
+               (id, user_id, balance, account_type, account_number, cvv, expiry_date,
+                upi_id, ifsc, bank_name, wallet_address, network)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                acc_id, account.user_id, account.balance, account.account_type,
+                account.account_number, account.cvv, account.expiry_date,
+                account.upi_id, account.ifsc, account.bank_name,
+                account.wallet_address, account.network,
+            )
+        )
+    return AccountResponse(id=acc_id, **account.dict())
 
-    data = {
-        "id": acc_id,
-        "user_id": account.user_id,
-        "balance": account.balance,
-        "account_type": account.account_type,
-        "account_number": account.account_number,
-        "cvv": account.cvv,
-        "expiry_date": account.expiry_date,
-        "upi_id": account.upi_id,
-        "ifsc": account.ifsc,
-        "bank_name": account.bank_name,
-        "wallet_address": account.wallet_address,
-        "network": account.network,
-        "created_at": datetime.utcnow().isoformat()
-    }
-    try:
-        supabase.table("accounts").insert(data).execute()
-        return AccountResponse(id=acc_id, **account.dict())
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create account in Supabase: {str(e)}")
 
 @router.get("/lookup/{account_number}", response_model=AccountResponse)
 def lookup_account(account_number: str):
-    supabase = get_supabase()
-        
-    try:
-        response = supabase.table("accounts").select("*").eq("account_number", account_number).execute()
-        if response.data:
-            row = response.data[0]
-            return AccountResponse(
-                id=str(row["id"]),
-                user_id=row["user_id"],
-                balance=row["balance"],
-                account_type=row.get("account_type", "CARD"),
-                account_number=row.get("account_number"),
-            )
-        else:
-            raise HTTPException(status_code=404, detail="Account not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM accounts WHERE account_number = ?", (account_number,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return _row_to_response(row)
+
 
 @router.delete("/{account_id}")
 def delete_account(account_id: str):
-    supabase = get_supabase()
-    
-    try:
-        supabase.table("accounts").delete().eq("id", account_id).execute()
-        return {"detail": "Account deleted successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    with get_db() as conn:
+        conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+    return {"detail": "Account deleted successfully"}

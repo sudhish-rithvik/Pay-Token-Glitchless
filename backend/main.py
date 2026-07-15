@@ -11,16 +11,21 @@ if SRC_DIR not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from backend.routers import auth, accounts, payments, payees
+from backend.db import init_db
 
-app = FastAPI(title="Unified Payment Orchestrator API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialise local SQLite DB and seed sample data on every startup
+    init_db()
+    yield
+
+
+app = FastAPI(title="TokenOne Payment Orchestrator API", lifespan=lifespan)
 
 # CORS
-origins = [
-    "http://localhost:3000",
-    "http://localhost:8000",
-]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,8 +42,8 @@ app.include_router(payees.router)
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to Unified Pay API"}
+    return {"message": "TokenOne API — local SQLite mode"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

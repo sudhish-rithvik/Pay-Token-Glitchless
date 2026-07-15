@@ -1,38 +1,87 @@
 import unittest
 from src.unified_pay.services.payment_processor import PaymentProcessor
 from src.unified_pay.models.account import Account
-from src.unified_pay.models.transaction import Transaction
+from src.unified_pay.models.payment_method import PaymentMethod
 
 class TestPaymentProcessor(unittest.TestCase):
 
     def setUp(self):
         self.processor = PaymentProcessor()
-        self.sender_account = Account(account_id="123", user_id="user1", balance=1000)
-        self.receiver_account = Account(account_id="456", user_id="user2", balance=500)
+        self.sender_account = Account(account_id="acc123", user_id="user1", balance=1000)
+        self.receiver_account = Account(account_id="acc456", user_id="user2", balance=500)
 
     def test_initiate_payment_success(self):
         amount = 100
-        transaction = self.processor.initiate_payment(self.sender_account, self.receiver_account, amount)
-        self.assertIsInstance(transaction, Transaction)
-        self.assertEqual(transaction.amount, amount)
-        self.assertEqual(self.sender_account.balance, 900)
-        self.assertEqual(self.receiver_account.balance, 600)
-        
-    def test_initiate_payment_insufficient_funds(self):
-        amount = 1100
-        with self.assertRaises(ValueError):
-            self.processor.initiate_payment(self.sender_account, self.receiver_account, amount)
+        tx = self.processor.initiate_payment(
+            from_account=self.sender_account,
+            to_account=self.receiver_account,
+            amount=amount,
+            currency="INR"
+        )
+        self.assertIsInstance(tx, dict)
+        self.assertEqual(tx["amount"], amount)
+        self.assertEqual(tx["from_account_id"], "acc123")
+        self.assertEqual(tx["to_account_id"], "acc456")
+        self.assertEqual(tx["status"], "PENDING")
 
-    def test_confirm_payment(self):
-        amount = 100
-        transaction = self.processor.initiate_payment(self.sender_account, self.receiver_account, amount)
-        self.processor.confirm_payment(transaction)
-        self.assertTrue(transaction.is_confirmed)
-
-    def test_confirm_payment_invalid_transaction(self):
-        invalid_transaction = Transaction(transaction_id="invalid", amount=100)
+    def test_initiate_payment_invalid_amount(self):
         with self.assertRaises(ValueError):
-            self.processor.confirm_payment(invalid_transaction)
+            self.processor.initiate_payment(
+                from_account=self.sender_account,
+                to_account=self.receiver_account,
+                amount=0
+            )
+        with self.assertRaises(ValueError):
+            self.processor.initiate_payment(
+                from_account=self.sender_account,
+                to_account=self.receiver_account,
+                amount=-50
+            )
+
+    def test_initiate_payment_same_account(self):
+        with self.assertRaises(ValueError):
+            self.processor.initiate_payment(
+                from_account=self.sender_account,
+                to_account=self.sender_account,
+                amount=100
+            )
+
+    def test_confirm_payment_by_dict(self):
+        tx = self.processor.initiate_payment(
+            from_account=self.sender_account,
+            to_account=self.receiver_account,
+            amount=100
+        )
+        success = self.processor.confirm_payment(tx)
+        self.assertTrue(success)
+        self.assertEqual(tx["status"], "COMPLETED")
+
+    def test_confirm_payment_by_id(self):
+        tx = self.processor.initiate_payment(
+            from_account=self.sender_account,
+            to_account=self.receiver_account,
+            amount=100
+        )
+        success = self.processor.confirm_payment(tx["transaction_id"])
+        self.assertTrue(success)
+        # Verify in processor storage
+        stored_tx = self.processor.get_transaction(tx["transaction_id"])
+        self.assertIsNotNone(stored_tx)
+        self.assertEqual(stored_tx["status"], "COMPLETED")
+
+    def test_confirm_payment_mark_failed(self):
+        tx = self.processor.initiate_payment(
+            from_account=self.sender_account,
+            to_account=self.receiver_account,
+            amount=100
+        )
+        success = self.processor.confirm_payment(tx, mark_failed=True)
+        self.assertTrue(success)
+        self.assertEqual(tx["status"], "FAILED")
+
+    def test_confirm_payment_invalid_id(self):
+        success = self.processor.confirm_payment("non_existent_tx_id")
+        self.assertFalse(success)
 
 if __name__ == '__main__':
     unittest.main()
